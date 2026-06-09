@@ -28,18 +28,29 @@ subs = [
 
 
 # -------------------------
-# CACHE
+# SAFE CACHE LOAD
 # -------------------------
 def load_cache():
-    if os.path.exists(CACHE_FILE):
-        try:
-            return json.load(open(CACHE_FILE, "r"))
-        except:
+    if not os.path.exists(CACHE_FILE):
+        return {}
+
+    try:
+        data = json.load(open(CACHE_FILE, "r"))
+
+        # 🔥 FIX: اگر خراب یا list بود
+        if not isinstance(data, dict):
             return {}
-    return {}
+
+        return data
+
+    except:
+        return {}
 
 
 def save_cache(cache):
+    if not isinstance(cache, dict):
+        cache = {}
+
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
@@ -50,6 +61,8 @@ def save_cache(cache):
 def fetch_sub(url):
     try:
         r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return []
         return [x.strip() for x in r.text.splitlines() if x.strip()]
     except:
         return []
@@ -94,7 +107,6 @@ def score_proxy(host, port):
 
     score = 0
 
-    # TCP weight
     if tcp < 200:
         score += 50
     elif tcp < 500:
@@ -102,7 +114,6 @@ def score_proxy(host, port):
     else:
         score += 10
 
-    # HTTP weight
     if http:
         if http < 300:
             score += 50
@@ -115,18 +126,15 @@ def score_proxy(host, port):
 
 
 # -------------------------
-# PARSE (minimal)
+# PARSE
 # -------------------------
 def parse(line, idx):
     if line.startswith("vless://"):
-        try:
-            return {
-                "name": f"proxy-{idx}",
-                "type": "vless",
-                "raw": line
-            }
-        except:
-            return None
+        return {
+            "name": f"proxy-{idx}",
+            "type": "vless",
+            "raw": line
+        }
 
     if line.startswith("vmess://"):
         return {
@@ -139,10 +147,13 @@ def parse(line, idx):
 
 
 # -------------------------
-# UPDATE CACHE + RANKING
+# UPDATE CACHE (FIXED)
 # -------------------------
 def update_cache(cache, proxies):
-    new_cache = cache.copy()
+    if not isinstance(cache, dict):
+        cache = {}
+
+    new_cache = dict(cache)
 
     for p in proxies:
         key = p["raw"]
@@ -157,14 +168,15 @@ def update_cache(cache, proxies):
 
         entry = new_cache[key]
 
-        if p["type"] == "vless":
-            try:
-                host_port = p["raw"].split("@")[1].split("?")[0]
-                host, port = host_port.split(":")
-            except:
-                continue
-        else:
-            continue  # vmess parsing سبک نگه داشتیم
+        # فقط vless تست دقیق (vmess فعلاً skip)
+        if p["type"] != "vless":
+            continue
+
+        try:
+            host_port = p["raw"].split("@")[1].split("?")[0]
+            host, port = host_port.split(":")
+        except:
+            continue
 
         s = score_proxy(host, port)
 
@@ -174,6 +186,7 @@ def update_cache(cache, proxies):
             entry["score"] = s
             entry["fail"] = 0
             entry["last_ok"] = int(time.time())
+            entry["config"] = p
 
         if entry["fail"] >= FAIL_LIMIT:
             continue
@@ -183,27 +196,24 @@ def update_cache(cache, proxies):
     # حذف fail شده‌ها
     return {
         k: v for k, v in new_cache.items()
-        if v["fail"] < FAIL_LIMIT
+        if isinstance(v, dict) and v.get("fail", 0) < FAIL_LIMIT
     }
 
 
 # -------------------------
-# BUILD SORTED OUTPUT
+# BUILD OUTPUT (TOP 10)
 # -------------------------
 def build_output(cache):
     items = list(cache.values())
 
-    # sort by score
-    items.sort(key=lambda x: x["score"], reverse=True)
+    # فقط valid ها
+    items = [i for i in items if isinstance(i, dict)]
 
-    # top 10 فقط نگه دار
+    items.sort(key=lambda x: x.get("score", 0), reverse=True)
+
     items = items[:10]
 
-    lines = []
-    for i, item in enumerate(items):
-        lines.append(item["config"]["raw"])
-
-    return lines
+    return [i["config"]["raw"] for i in items if "config" in i]
 
 
 # -------------------------
@@ -229,13 +239,11 @@ def main():
 
     best = build_output(cache)
 
-    # merge file
-    with open(MERGE_FILE, "w") as f:
+    with open(MERGE_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(best))
 
-    # v2rayng
     encoded = base64.b64encode("\n".join(best).encode()).decode()
-    with open(V2RAY_FILE, "w") as f:
+    with open(V2RAY_FILE, "w", encoding="utf-8") as f:
         f.write(encoded)
 
     print("DONE")
